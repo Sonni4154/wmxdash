@@ -1,0 +1,121 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - wmxnet
+
+  api:
+    image: employee-dashboard-api
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: app
+      args:
+        APP_PATH: apps/server
+    command: ["sh","-lc","node apps/server/dist/index.js"]
+    env_file:
+      - ./.env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wmxnet
+
+  refresher:
+    image: employee-dashboard-refresher
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    # if your Dockerfile uses APP_PATH for multi-build, keep the args:
+      target: app
+      args:
+        APP_PATH: apps/refresher
+    command: ["sh","-lc","pnpm -C apps/refresher build && pnpm -C apps/refresher start"]
+    env_file:
+      - ./.env
+    environment:
+      API_URL: "http://api:3000"
+      ADMIN_API_KEY: "${ADMIN_API_KEY}"
+      REFRESH_INTERVAL_MS: "${REFRESH_INTERVAL_MS:-60000}"
+      REFRESH_THRESHOLD_S: "${REFRESH_THRESHOLD_S:-900}"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - wmxnet
+    healthcheck:
+     test: ["CMD", "node", "-e", "fetch('http://api:3000/api/qbo/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+     interval: 30s
+     timeout: 5s
+     retries: 5
+     start_period: 20s
+
+#  web:
+#    image: employee-dashboard-web
+#    build:
+#      context: ../..
+#      dockerfile: infra/docker/Dockerfile
+#      target: app
+#      args:
+#        APP_PATH: apps/web
+#    command: ["pnpm", "-C", "apps/web", "start"]
+#    env_file:
+#      - ./.env
+#    environment:
+#      NODE_ENV: production
+#      PORT: "5173"
+#    depends_on:
+#      api:
+#        condition: service_started
+#    ports:
+#      - "5173:5173"
+#    restart: unless-stopped
+#    healthcheck:
+#      test:
+#        - CMD
+#        - node
+#        - -e
+#        - |
+#          fetch('http://127.0.0.1:5173/')
+#            .then(r => process.exit(r.ok ? 0 : 1))
+#            .catch(() => process.exit(1));
+#      interval: 30s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 20s
+#    networks: [wmxnet]
+
+networks:
+  wmxnet:
+   driver: bridge
+
+volumes:
+  pgdata:
+

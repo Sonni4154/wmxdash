@@ -1,0 +1,39 @@
+// apps/server/src/qboRoutes.ts
+import type { Express, Request, Response } from 'express';
+import { qboQuery, qboCDC, getIntegrationId } from './qboClient.js';
+
+export function mountQboRoutes(app: Express) {
+  // ✅ CDC FIRST so it isn’t shadowed by /:entity
+  app.get('/api/qbo/cdc', async (req: Request, res: Response) => {
+    try {
+      const entities = String(req.query.entities ?? 'Customers,Items')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const since = String(req.query.since ?? new Date(Date.now() - 86400000).toISOString());
+      const data = await qboCDC(entities, since);
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: 'internal_error', detail: e?.message });
+    }
+  });
+
+  // …then your status or other specific endpoints…
+
+  // Generic list route LAST (customers/items/invoices/etc.)
+  app.get('/api/qbo/:entity', async (req: Request, res: Response) => {
+    try {
+      const entity = String(req.params.entity);
+      const opts: Record<string, any> = {};
+      // optional pass-throughs
+      if (req.query.fetchAll != null) opts.fetchAll = String(req.query.fetchAll) === 'true';
+      if (req.query.limit != null)    opts.limit    = Number(req.query.limit);
+      if (req.query.offset != null)   opts.offset   = Number(req.query.offset);
+      const data = await qboQuery(entity, opts);
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: 'internal_error', detail: e?.message });
+    }
+  });
+}
+

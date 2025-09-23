@@ -1,0 +1,27 @@
+// apps/server/src/qboRoutes.ts
+import type { Express, Request, Response } from 'express';
+import { qboQuery, qboCDC } from './qboClient.js';
+
+export function mountQboRoutes(app: Express) {
+  // (Optional) If you ALSO define /api/qbo/status in index.ts, don't re-define it here.
+  // Leave it out to avoid dup handlers.
+
+  // Generic list endpoint LAST, e.g. /api/qbo/customers?fetchAll=true&limit=100
+  app.get('/api/qbo/:entity', async (req, res, next) => {
+  if (req.params.entity?.toLowerCase() === 'cdc') return next(); // let index.ts handle CDC
+
+    try {
+      const entity = String(req.params.entity);
+      const opts: Record<string, any> = {};
+      if (req.query.fetchAll != null) opts.fetchAll = String(req.query.fetchAll) === 'true';
+      if (req.query.limit    != null) opts.limit    = Number(req.query.limit);
+      if (req.query.offset   != null) opts.offset   = Number(req.query.offset);
+
+      const data = await qboQuery(entity, opts);
+      res.json(data);
+    } catch (e) {
+    next(e);
+  }
+});      
+}
+

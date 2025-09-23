@@ -1,0 +1,44 @@
+// apps/server/src/qboRoutes.ts
+import type { Express, Request, Response } from 'express';
+import { qboQuery, qboCDC, getIntegrationId } from './qboClient.js';
+
+export function mountQboRoutes(app: Express) {
+  // Status (reads DB only)
+  app.get('/api/qbo/status', async (_req: Request, res: Response) => {
+    try {
+      const integrationId = await getIntegrationId();
+      // a tiny ping to verify we have tokens by attempting a cheap query
+      res.json({ ok: true, integrationId });
+    } catch (e: any) {
+      res.status(500).json({ error: 'internal_error', detail: e?.message });
+    }
+  });
+
+  // Generic list endpoint: /api/qbo/customers?fetchAll=true&limit=100
+  app.get('/api/qbo/:entity', async (req: Request, res: Response) => {
+    try {
+      const entity = String(req.params.entity);
+      const opts = Object.fromEntries(Object.entries(req.query).map(([k, v]) => [k, String(v as any)]));
+      const data = await qboQuery(entity, opts);
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: 'internal_error', detail: e?.message });
+    }
+  });
+
+  // CDC: /api/qbo/cdc?entities=Customers,Items&since=2024-01-01T00:00:00Z
+  app.get('/api/qbo/cdc', async (req: Request, res: Response) => {
+    try {
+      const entities = String(req.query.entities ?? 'Customers,Items')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const since = String(req.query.since ?? new Date(Date.now() - 86400000).toISOString());
+      const data = await qboCDC(entities, since);
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: 'internal_error', detail: e?.message });
+    }
+  });
+}
+

@@ -1,0 +1,19 @@
+{
+  "name": "@qbo/token-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "pnpm exec tsc -p ."
+  },
+  "dependencies": {
+    "date-fns": "^3.6.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/node": "^20.14.9"
+  }
+}

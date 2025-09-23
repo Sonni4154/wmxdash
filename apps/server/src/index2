@@ -1,0 +1,508 @@
+import express, { type Request, type Response } from 'express';
+import { Pool } from 'pg';
+import { fetchAllCustomers, fetchAllItems, fetchAllInvoices,
+         upsertCustomers, upsertItems, upsertInvoices } from './qbo.js';
+import { mountQboRoutes } from './qboRoutes.js';  // ← add this
+import { qboCDC } from './qboClient.js';
+const app = express();
+mountQboRoutes(app);  
+// Accept both singular and plural names and normalize to QBO-expected singulars
+const normalizeCdc = (s: string) => {
+  switch (s.trim().toLowerCase()) {
+    case 'customers': case 'customer': return 'Customer';
+    case 'items':     case 'item':     return 'Item';
+    case 'vendors':   case 'vendor':   return 'Vendor';
+    case 'invoices':  case 'invoice':  return 'Invoice';
+    case 'accounts':  case 'account':  return 'Account';
+    case 'payments':  case 'payment':  return 'Payment';
+    case 'estimates': case 'estimate': return 'Estimate';
+    case 'bills':     case 'bill':     return 'Bill';
+    case 'purchases': case 'purchase': return 'Purchase';
+    case 'journalentries': case 'journalentry': return 'JournalEntry';
+    case 'timeactivities': case 'timeactivity': return 'TimeActivity';
+    default: return s; // pass through; QBO might support others
+  }
+};
+
+
+// Keep your alias (optional) so existing tests keep working
+app.get('/api/qbo-cdc', async (req, res) => {
+  req.url = '/api/qbo/cdc' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+  (app._router as any).handle(req, res, () => {});
+});
+
+app.get('/api/qbo-cdc', async (req, res) => {
+  try {
+    const entities = String(req.query.entities ?? 'Customers,Items').split(',').map(s => s.trim()).filter(Boolean);
+    const since = String(req.query.since ?? new Date(Date.now() - 86400000).toISOString());
+    const data = await qboCDC(entities, since);
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: 'internal_error', detail: e?.message });
+  }
+});
+
+export type IntuitTokenResponse = {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+  realmId?: string;
+};
+
+                         
+
+app.use(express.json());
+
+const port = process.env.PORT || 3000;
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+const INTEGRATION_PROVIDER = process.env.INTEGRATION_PROVIDER || 'quickbooks';
+// IMPORTANT: org_id in `integrations` is a UUID. Set INTEGRATION_ORG_ID (UUID) in .env.
+const INTEGRATION_ORG_ID = process.env.INTEGRATION_ORG_ID || "default-org";
+const ADMIN_KEY = process.env.ADMIN_API_KEY || '';
+
+
+// --- helpers (put near top, after pool is created) ---
+async function tableExists(name: string): Promise<boolean> {
+  const { rows } = await pool.query<{ exists: boolean }>(
+    `SELECT (to_regclass($1) IS NOT NULL) AS exists`,
+    [name]
+  );
+  return rows[0]?.exists ?? false;
+}
+
+function daysAgo(n: number): string {
+  const d = new Date(Date.now() - n * 86400_000);
+  return d.toISOString();
+}
+
+// --- Integrations: shows QBO connected if row is present; otherwise default "connected" ---
+app.get('/api/integrations', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.integrations')) {
+      const { rows } = await pool.query(
+        `SELECT provider, org_id, updated_at
+           FROM integrations
+          ORDER BY updated_at DESC`
+      );
+      return res.json(
+        rows.map(r => ({
+          provider: r.provider,
+          status: 'connected',
+          org_id: r.org_id,
+          updated_at: r.updated_at
+        }))
+      );
+    }
+    // fallback
+    return res.json([{ provider: 'quickbooks', status: 'connected' }]);
+  } catch (e) {
+    console.error('[integrations] error:', e);
+    return res.json([{ provider: 'quickbooks', status: 'connected' }]);
+  }
+});
+
+// --- Dashboard stats: use invoices if present; else zeros ---
+app.get('/api/dashboard/stats', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.invoices')) {
+      const { rows } = await pool.query(
+        `WITH last30 AS (
+           SELECT *
+             FROM invoices
+            WHERE issued_at >= NOW() - INTERVAL '30 days'
+         )
+         SELECT
+           COALESCE(SUM(CASE WHEN status IN ('sent','paid') THEN total_cents END),0)::bigint AS revenue_30d_cents,
+           COUNT(*) FILTER (WHERE status IN ('sent','paid')) AS invoices_30d,
+           COUNT(DISTINCT customer_id) FILTER (WHERE status IN ('sent','paid')) AS new_customers_30d,
+           COUNT(*) FILTER (WHERE status = 'overdue') AS overdue_invoices
+         FROM last30;`
+      );
+      const r = rows[0];
+      return res.json({
+        revenue_30d: Number(r.revenue_30d_cents) / 100,
+        invoices_30d: Number(r.invoices_30d),
+        new_customers_30d: Number(r.new_customers_30d),
+        overdue_invoices: Number(r.overdue_invoices),
+      });
+    }
+    // fallback
+    return res.json({
+      revenue_30d: 0,
+      invoices_30d: 0,
+      new_customers_30d: 0,
+      overdue_invoices: 0,
+    });
+  } catch (e) {
+    console.error('[dashboard/stats] error:', e);
+    return res.json({ revenue_30d: 0, invoices_30d: 0, new_customers_30d: 0, overdue_invoices: 0 });
+  }
+});
+
+// GET /api/qbo/sync/customers
+app.get('/api/qbo/sync/customers', async (_req, res) => {
+  try {
+    const data = await fetchAllCustomers();
+    const { inserted, updated } = await upsertCustomers(data);
+    res.json({ ok: true, count: data.length, inserted, updated });
+  } catch (e) {
+    console.error('[qbo/sync/customers]', e);
+    res.status(500).json({ error: 'sync_failed' });
+  }
+});
+
+// GET /api/qbo/sync/items
+app.get('/api/qbo/sync/items', async (_req, res) => {
+  try {
+    const data = await fetchAllItems();
+    const r = await upsertItems(data);
+    res.json({ ok: true, count: data.length, ...r });
+  } catch (e) {
+    console.error('[qbo/sync/items]', e);
+    res.status(500).json({ error: 'sync_failed' });
+  }
+});
+
+// GET /api/qbo/sync/invoices
+app.get('/api/qbo/sync/invoices', async (_req, res) => {
+  try {
+    const data = await fetchAllInvoices();
+    const r = await upsertInvoices(data);
+    res.json({ ok: true, count: data.length, ...r });
+  } catch (e) {
+    console.error('[qbo/sync/invoices]', e);
+    res.status(500).json({ error: 'sync_failed' });
+  }
+});
+
+// --- Customers: real table if exists; else sample list ---
+app.get('/api/customers', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.customers')) {
+      const { rows } = await pool.query(
+        `SELECT id, name, email, created_at
+           FROM customers
+          ORDER BY created_at DESC
+          LIMIT 50`
+      );
+      return res.json(rows);
+    }
+    // fallback
+    return res.json([
+      { id: 'C-1001', name: 'Acme Marine', email: 'ops@acmemarine.test', created_at: daysAgo(2) },
+      { id: 'C-1002', name: 'Harbor Supply', email: 'hello@harborsupply.test', created_at: daysAgo(6) },
+    ]);
+  } catch (e) {
+    console.error('[customers] error:', e);
+    return res.json([]);
+  }
+});
+
+// --- Products: real table if exists; else sample list ---
+app.get('/api/products', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.products')) {
+      const { rows } = await pool.query(
+        `SELECT id, name, sku, unit_price_cents, updated_at
+           FROM products
+          ORDER BY updated_at DESC
+          LIMIT 50`
+      );
+      return res.json(
+        rows.map(r => ({
+          id: r.id,
+          name: r.name,
+          sku: r.sku,
+          price: Number(r.unit_price_cents) / 100,
+          updated_at: r.updated_at,
+        }))
+      );
+    }
+    // fallback
+    return res.json([
+      { id: 'P-001', name: 'Bottom Paint (1 gal)', sku: 'BP-1G', price: 129.0, updated_at: daysAgo(1) },
+      { id: 'P-002', name: 'Zinc Anode Kit',        sku: 'ZINC-KIT', price: 45.0,  updated_at: daysAgo(4) },
+    ]);
+  } catch (e) {
+    console.error('[products] error:', e);
+    return res.json([]);
+  }
+});
+
+// --- Invoices: real table if exists; else sample list ---
+app.get('/api/invoices', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.invoices')) {
+      const { rows } = await pool.query(
+        `SELECT id, customer_name, total_cents, status, issued_at, due_at
+           FROM invoices
+          ORDER BY issued_at DESC
+          LIMIT 50`
+      );
+      return res.json(
+        rows.map(r => ({
+          id: r.id,
+          customer: r.customer_name,
+          total: Number(r.total_cents) / 100,
+          status: r.status,
+          issued_at: r.issued_at,
+          due_at: r.due_at,
+        }))
+      );
+    }
+    // fallback
+    return res.json([
+      { id: 'INV-0001', customer: 'Acme Marine',   total: 980.00, status: 'sent',   issued_at: daysAgo(3), due_at: daysAgo(-27) },
+      { id: 'INV-0002', customer: 'Harbor Supply', total: 145.50, status: 'draft',  issued_at: daysAgo(1), due_at: daysAgo(29)  },
+      { id: 'INV-0003', customer: 'Acme Marine',   total: 220.00, status: 'paid',   issued_at: daysAgo(12), due_at: daysAgo(18) },
+    ]);
+  } catch (e) {
+    console.error('[invoices] error:', e);
+    return res.json([]);
+  }
+});
+
+// --- Activity feed: sample events; you can later back it with a table ---
+app.get('/api/activity', async (_req: Request, res: Response) => {
+  try {
+    // If you create an activity table later, query it here.
+    return res.json([
+      { id: 'A-1', type: 'note',   message: 'Welcome to the new dashboard!', at: daysAgo(0) },
+      { id: 'A-2', type: 'invoice', message: 'Invoice INV-0002 drafted',     at: daysAgo(1) },
+      { id: 'A-3', type: 'sync',   message: 'QuickBooks sync succeeded',     at: daysAgo(2) },
+    ]);
+  } catch (e) {
+    console.error('[activity] error:', e);
+    return res.json([]);
+  }
+});
+
+// --- Time entries (sample) ---
+app.get('/api/time-entries', async (_req: Request, res: Response) => {
+  try {
+    if (await tableExists('public.time_entries')) {
+      const { rows } = await pool.query(
+        `SELECT id, employee_name, project, hours, started_at
+           FROM time_entries
+          ORDER BY started_at DESC
+          LIMIT 50`
+      );
+      return res.json(rows);
+    }
+    return res.json([
+      { id: 'T-1', employee_name: 'Sam',   project: 'Haul-out', hours: 3.5, started_at: daysAgo(0) },
+      { id: 'T-2', employee_name: 'Alex',  project: 'Rigging',  hours: 2.0, started_at: daysAgo(1) },
+      { id: 'T-3', employee_name: 'Jamie', project: 'Detail',   hours: 4.1, started_at: daysAgo(2) },
+    ]);
+  } catch (e) {
+    console.error('[time-entries] error:', e);
+    return res.json([]);
+  }
+});
+
+
+
+// Health
+app.get('/', (_req: Request, res: Response) => res.status(200).send('API is running'));
+
+// ---------- Helpers for official schema ----------
+async function ensureIntegrationId(): Promise<string> {
+  const { rows } = await pool.query(
+    `
+    INSERT INTO integrations (provider, org_id)
+    VALUES ($1, $2)
+    ON CONFLICT (provider, org_id)
+    DO UPDATE SET updated_at = NOW()
+    RETURNING id
+    `,
+    [INTEGRATION_PROVIDER, INTEGRATION_ORG_ID]
+  );
+  return rows[0].id as string;
+}
+
+async function getLatestQboTokenOfficial(integrationId: string) {
+  const { rows } = await pool.query(
+    `SELECT access_token, refresh_token, expires_at, realm_id, updated_at
+       FROM qbo_tokens
+      WHERE integration_id = $1
+      ORDER BY updated_at DESC
+      LIMIT 1`,
+    [integrationId]
+  );
+  return rows[0] || null;
+}
+
+async function upsertQboTokenOfficial(
+  integrationId: string,
+  {
+    access_token,
+    refresh_token,
+    expires_in,
+    realm_id,
+  }: { access_token: string; refresh_token: string; expires_in: number; realm_id?: string }
+) {
+  const expires_at = new Date(Date.now() + (Number(expires_in || 3600) - 60) * 1000);
+  await pool.query(
+    `
+    INSERT INTO qbo_tokens (integration_id, access_token, refresh_token, expires_at, realm_id)
+    VALUES ($1, $2, $3, $4, COALESCE($5, ''))
+    ON CONFLICT (integration_id) DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      refresh_token = EXCLUDED.refresh_token,
+      expires_at   = EXCLUDED.expires_at,
+      realm_id     = COALESCE(EXCLUDED.realm_id, qbo_tokens.realm_id),
+      version      = qbo_tokens.version + 1,
+      updated_at   = NOW()
+    `,
+    [integrationId, access_token, refresh_token, expires_at, realm_id || null]
+  );
+  return { access_token, refresh_token, expires_at, realm_id: realm_id || '' };
+}
+
+// ---------- Status (supports legacy or official) ----------
+app.get('/api/qbo/status', async (_req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query<{ has_integrations: boolean; has_tokens: boolean }>(
+      `SELECT (to_regclass('public.integrations') IS NOT NULL) AS has_integrations,
+              (to_regclass('public.qbo_tokens')   IS NOT NULL) AS has_tokens`
+    );
+    const hasIntegrations = rows[0]?.has_integrations;
+    const hasTokens = rows[0]?.has_tokens;
+
+    if (!hasTokens) return res.status(404).json({ hasToken: false });
+
+    if (hasIntegrations) {
+      const id = await ensureIntegrationId();
+      const tok = await getLatestQboTokenOfficial(id);
+      if (!tok) return res.status(404).json({ hasToken: false });
+      const now = new Date();
+      const secondsLeft = Math.max(
+        0,
+        Math.floor((new Date(tok.expires_at).getTime() - now.getTime()) / 1000)
+      );
+      return res.json({
+        provider: INTEGRATION_PROVIDER,
+        org_id: INTEGRATION_ORG_ID,
+        hasToken: true,
+        expires_at: tok.expires_at,
+        seconds_until_expiry: secondsLeft,
+        realm_id: tok.realm_id,
+        updated_at: tok.updated_at,
+      });
+    } else {
+      // legacy simple table
+      const { rows: r } = await pool.query(
+        `SELECT token, updated_at FROM qbo_tokens WHERE id = 1`
+      );
+      if (r.length === 0) return res.status(404).json({ hasToken: false });
+      return res.json({ hasToken: true, token: r[0].token, updated_at: r[0].updated_at });
+    }
+  } catch (e) {
+    console.error('[qbo/status] error:', e);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+// --- Minimal stubs to satisfy common widgets ---
+
+// Dashboard stats
+app.get('/api/dashboard/stats', (_req, res) => {
+  res.json({
+    revenue_30d: 0,
+    invoices_30d: 0,
+    new_customers_30d: 0,
+    overdue_invoices: 0
+  });
+});
+
+// Recent invoices/activity (placeholders)
+app.get('/api/invoices', (_req, res) => {
+  res.json([{ id: 'INV-0001', customer: 'Sample Customer', total: 0, status: 'draft', issued_at: new Date().toISOString() }]);
+});
+app.get('/api/activity', (_req, res) => {
+  res.json([{ id: 'A-1', type: 'note', message: 'Welcome to the new dashboard!', at: new Date().toISOString() }]);
+});
+
+// Optional logout/login no-ops so buttons don’t 404
+app.post('/api/logout', (_req, res) => res.json({ ok: true }));
+app.post('/api/login', (_req, res) => res.json({ ok: true }));
+
+// ---------- Manual refresh (official schema) ----------
+app.post('/api/qbo/refresh', async (req: Request, res: Response) => {
+  try {
+    if (ADMIN_KEY && req.headers['x-admin-key'] !== ADMIN_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const clientId = process.env.QBO_CLIENT_ID;
+    const clientSecret = process.env.QBO_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return res.status(400).json({ error: 'missing_client_credentials' });
+    }
+
+    const integrationId = await ensureIntegrationId();
+    const existing = await getLatestQboTokenOfficial(integrationId);
+    let refreshToken = existing?.refresh_token || process.env.QBO_REFRESH_TOKEN_INIT || '';
+
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'no_refresh_token_available' });
+    }
+
+    const tokenUrl = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    });
+
+    const resp = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${basic}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body,
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error('[qbo/refresh] Intuit error:', resp.status, text);
+      return res.status(resp.status).json({ error: 'intuit_error', detail: text });
+    }
+
+    const data = (await resp.json()) as IntuitTokenResponse;
+    const saved = await upsertQboTokenOfficial(integrationId, {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || refreshToken,
+      expires_in: Number(data.expires_in || 3600),
+      realm_id: data.realmId || existing?.realm_id || undefined,
+    });
+
+    res.json({
+      ok: true,
+      provider: INTEGRATION_PROVIDER,
+      org_id: INTEGRATION_ORG_ID,
+      expires_at: saved.expires_at,
+      realm_id: saved.realm_id,
+    });
+  } catch (e) {
+    console.error('[qbo/refresh] error:', e);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// Demo employees (unchanged)
+app.get('/api/employees', async (_req: Request, res: Response) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, department, title FROM employees ORDER BY id'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[server] error fetching employees:', err);
+    res.status(500).json({ error: 'Failed to fetch employees' });
+  }
+});
+
+app.listen(port, () => console.log(`[server] listening on port ${port}`));
+
