@@ -1,61 +1,43 @@
 import { Router } from "express";
-import { pool } from "../db.js";
+import { pool } from "./db.js";
 import { DateTime } from "luxon";
 
 const router = Router();
 
-/**
- * Suspicious rules (PST):
- *  - OUT after 6pm
- *  - IN before 8am
- *  - Any weekend clock (Sat/Sun)
- * NOTE: users never see this flag on the UI; it's for admin review.
- */
+/** PST suspicious rules */
 function computeSuspicious(action: "in" | "out", nowUtcISO?: string) {
   const nowPst = DateTime.fromISO(nowUtcISO ?? DateTime.utc().toISO(), { zone: "utc" })
     .setZone("America/Los_Angeles");
   const isWeekend = nowPst.weekday === 6 || nowPst.weekday === 7; // Sat=6, Sun=7
   const hour = nowPst.hour;
-
   if (isWeekend) return true;
-  if (action === "out" && hour >= 18) return true; // after 6pm
-  if (action === "in" && hour < 8) return true;    // before 8am
+  if (action === "out" && hour >= 18) return true;
+  if (action === "in" && hour < 8) return true;
   return false;
 }
 
-/**
- * POST /api/time/punch
- * { employee: string, action: "in" | "out", note?: string }
- */
+// POST /api/time/punch  { employee: string, action: "in"|"out", note?: string }
 router.post("/punch", async (req, res) => {
   try {
     const { employee, action, note } = req.body || {};
-    if (!employee || typeof employee !== "string") {
-      return res.status(400).json({ ok: false, error: "employee required" });
-    }
-    if (action !== "in" && action !== "out") {
-      return res.status(400).json({ ok: false, error: "action must be 'in' or 'out'" });
-    }
+    if (!employee || typeof employee !== "string") return res.status(400).json({ ok: false, error: "employee required" });
+    if (action !== "in" && action !== "out") return res.status(400).json({ ok: false, error: "action must be 'in' or 'out'" });
 
     const suspicious = computeSuspicious(action);
     const { rows } = await pool.query(
-      `
-        INSERT INTO timeclock_entries (employee_name, action, note, suspicious)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, employee_name, action, note, suspicious, created_at
-      `,
+      `INSERT INTO timeclock_entries (employee_name, action, note, suspicious)
+       VALUES ($1,$2,$3,$4)
+       RETURNING id, employee_name, action, note, suspicious, created_at`,
       [employee.trim(), action, note ?? null, suspicious]
     );
-    return res.json({ ok: true, entry: rows[0] });
-  } catch (err: any) {
-    console.error("POST /time/punch error", err);
-    return res.status(500).json({ ok: false, error: "internal_error" });
+    res.json({ ok: true, entry: rows[0] });
+  } catch (e) {
+    console.error("POST /time/punch", e);
+    res.status(500).json({ ok: false, error: "internal_error" });
   }
 });
 
-/**
- * GET /api/time/entries?employee=NAME&limit=10
- */
+// GET /api/time/entries?employee=NAME&limit=10
 router.get("/entries", async (req, res) => {
   try {
     const employee = String(req.query.employee || "").trim();
@@ -63,52 +45,41 @@ router.get("/entries", async (req, res) => {
     if (!employee) return res.status(400).json({ ok: false, error: "employee required" });
 
     const { rows } = await pool.query(
-      `
-        SELECT id, employee_name, action, note, suspicious, created_at
-        FROM timeclock_entries
-        WHERE employee_name = $1
-        ORDER BY created_at DESC
-        LIMIT $2
-      `,
+      `SELECT id, employee_name, action, note, suspicious, created_at
+       FROM timeclock_entries
+       WHERE employee_name = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
       [employee, limit]
     );
-
-    // Client should ignore 'suspicious'; we still include it for admin tools.
-    return res.json({ ok: true, total: rows.length, limit, offset: 0, data: rows });
-  } catch (err: any) {
-    console.error("GET /time/entries error", err);
-    return res.status(500).json({ ok: false, error: "internal_error" });
+    res.json({ ok: true, total: rows.length, limit, offset: 0, data: rows });
+  } catch (e) {
+    console.error("GET /time/entries", e);
+    res.status(500).json({ ok: false, error: "internal_error" });
   }
 });
 
-/**
- * GET /api/time/status?employee=NAME
- * Returns whether the employee is currently clocked in (based on last punch)
- */
+// GET /api/time/status?employee=NAME
 router.get("/status", async (req, res) => {
   try {
     const employee = String(req.query.employee || "").trim();
     if (!employee) return res.status(400).json({ ok: false, error: "employee required" });
 
     const { rows } = await pool.query(
-      `
-        SELECT action, created_at
-        FROM timeclock_entries
-        WHERE employee_name = $1
-        ORDER BY created_at DESC
-        LIMIT 1
-      `,
+      `SELECT action, created_at
+       FROM timeclock_entries
+       WHERE employee_name = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [employee]
     );
-
     const last = rows[0];
     const clocked_in = last ? last.action === "in" : false;
-    return res.json({ ok: true, clocked_in, last_punch_at: last?.created_at || null });
-  } catch (err: any) {
-    console.error("GET /time/status error", err);
-    return res.status(500).json({ ok: false, error: "internal_error" });
+    res.json({ ok: true, clocked_in, last_punch_at: last?.created_at ?? null });
+  } catch (e) {
+    console.error("GET /time/status", e);
+    res.status(500).json({ ok: false, error: "internal_error" });
   }
 });
 
 export default router;
-

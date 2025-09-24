@@ -4,6 +4,9 @@ import cors from 'cors';
 import morgan from 'morgan';
 import { env } from './env';
 import { qboRouter } from './routes/qbo';
+import dbRoutes from "./dbRoutes.js";
+import timeRoutes from "./timeRoutes.js";
+
 
 const app = express();
 app.set('trust proxy', 1);
@@ -16,6 +19,8 @@ app.get('/', (_req, res) => res.status(200).json({ ok: true, service: 'wmxdash-a
 
 // Mount QuickBooks ops (status/refresh for now)
 app.use('/api/qbo', qboRouter);
+app.use('/api/db', dbRoutes);
+app.use('/api/time', timeRoutes);
 
 // Demo/placeholder
 app.get('/api/employees', (_req, res) => res.json([{ id: 1, name: 'Demo' }]));
