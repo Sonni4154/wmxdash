@@ -2,8 +2,8 @@
 import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { raw as rawBody } from 'express';
-import timeRoutes from "./timeRoutes";
-import { Pool } from 'pg';
+import timeRoutes from "./timeRoutes.js";
+import dbRoutes from "./dbRoutes.js";
 import dbRoutes from './dbRoutes.js';
 import oauthRouter from './oauth.js';
 import webhookRouter from './webhooks.js';

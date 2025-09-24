@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { Pool } from "pg";
+import { pool } from "../db.js";
 
 // Prefer importing a shared pool if you already have one in ../db
 let pool: Pool;

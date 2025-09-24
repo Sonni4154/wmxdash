@@ -1,15 +1,11 @@
+// apps/server/src/timeRoutes.ts
 import { Router } from "express";
-import { Pool } from "pg";
+import { pool } from "../db.js";           // ← reuse shared pool + ESM .js extension
 import { DateTime } from "luxon";
 
 const router = Router();
 
-// Reuse your existing pool if you export it from db.ts; otherwise make one here.
-// Here we make a pool that reads DATABASE_URL from env (same as the rest of the API).
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : undefined,
-});
+
 
 /**
  * Suspicious rules (PST):
