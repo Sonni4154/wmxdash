@@ -2,10 +2,13 @@
 import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { raw as rawBody } from 'express';
-import timeRoutes from "./timeRoutes.js";
-import dbRoutes from "./dbRoutes.js";
+
+import dbRoutes from './dbRoutes.js';
+import timeRoutes from './timeRoutes.js';
+
 import oauthRouter from './oauth.js';
 import webhookRouter from './webhooks.js';
+
 import {
   fetchAllCustomers,
   fetchAllItems,
@@ -13,9 +16,11 @@ import {
   upsertCustomers,
   upsertItems,
   upsertInvoices,
-  getCompanyInfo, // NOTE: import this (not getQbo)
+  getCompanyInfo,
 } from './qbo.js';
+
 import { mountQboRoutes } from './qboRoutes.js';
+import { pool } from './db.js';
 
 export type IntuitTokenResponse = {
   access_token: string;
@@ -48,7 +53,6 @@ app.get('/api/qbo-cdc', (req, res, next) => {
   (app as any)._router.handle(req, res, next);
 });
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const port = Number(process.env.PORT || 3000);
 
 const INTEGRATION_PROVIDER = process.env.INTEGRATION_PROVIDER || 'quickbooks';
