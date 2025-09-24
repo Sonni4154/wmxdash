@@ -2,8 +2,9 @@
 import express, { type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import { raw as rawBody } from 'express';
+import timeRoutes from "./timeRoutes";
 import { Pool } from 'pg';
-
+import dbRoutes from './dbRoutes.js';
 import oauthRouter from './oauth.js';
 import webhookRouter from './webhooks.js';
 import {
@@ -25,6 +26,8 @@ export type IntuitTokenResponse = {
 };
 
 const app = express();
+app.use('/api/db', dbRoutes);
+app.use("/api/time", timeRoutes);
 
 // JSON for most routes
 app.use(express.json({ limit: '1mb' }));
@@ -421,7 +424,14 @@ app.get('/', (_req: Request, res: Response) => res.status(200).send('API is runn
 if (process.env.NODE_ENV !== 'test') {
   app.listen(port, () => console.log(`[server] listening on port ${port}`));
 }
-
+app.get('/api/debug/routes', (_req, res) => {
+  // @ts-ignore
+  const stack = app._router?.stack || [];
+  const routes = stack
+    .filter((l: any) => l.route?.path)
+    .map((l: any) => ({ method: Object.keys(l.route.methods)[0]?.toUpperCase(), path: l.route.path }));
+  res.json({ routes });
+});
 export default app;
 
 // NOTE: This optional constant is only here to prevent a TS typo from breaking runtime if someone reintroduces it.
