@@ -19,6 +19,25 @@ services:
     networks:
       - wmxnet
 
+  qbo-refresher:
+    build:
+      context: ../../services/qbo-refresher
+    image: qbo-refresher:latest
+    restart: always
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PGSSL: ${PGSSL:-false}
+      QBO_CLIENT_ID: ${QBO_CLIENT_ID}
+      QBO_CLIENT_SECRET: ${QBO_CLIENT_SECRET}
+      REFRESH_THRESHOLD_SECONDS: 1800    # optional, 30m
+      TICK_SECONDS: 300                   # optional, 5m loop
+      PORT: 8081
+    depends_on:
+      - db
+    ports:
+      - "8081:8081"  # optional, if you want to curl /healthz from host
+
+
   # one-shot migrations runner (applies /sql/*.sql)
   migrations:
     image: employee-dashboard-api

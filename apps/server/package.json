@@ -12,6 +12,7 @@
     "cookie-parser": "^1.4.7",
     "express": "^4.19.2",
     "luxon": "^3.7.2",
+    "node-fetch": "^3.3.2",
     "node-quickbooks": "^2.0.0",
     "pg": "^8.12.0"
   },

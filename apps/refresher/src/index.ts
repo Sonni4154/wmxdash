@@ -1,48 +1,107 @@
-// Simple auto-refresher: if <15m left on the token, call the API to refresh.
+import express from 'express';
 
-const API = process.env.API_URL || 'http://api:3000';
-const ADMIN_KEY = process.env.ADMIN_API_KEY || '';
-const INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS || 60_000); // check every 60s
-const THRESHOLD_S = Number(process.env.REFRESH_THRESHOLD_S || 900);   // refresh if <15m
+// --- Config (env) -----------------------------------------------------------
+const API_BASE = process.env.API_BASE ?? 'http://127.0.0.1:3000';
+const QBO_CRON_SECRET = process.env.QBO_CRON_SECRET ?? '';
+const PORT = Number(process.env.REFRESHER_PORT ?? 8090);
+const INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS ?? 45 * 60 * 1000); // 45m default
 
-async function once() {
+// --- In-memory metrics/state ------------------------------------------------
+const metrics = {
+  booted_at: Date.now(),
+  ticks: 0,
+  last_run_at: 0,
+  last_ok_at: 0,
+  last_error_at: 0,
+  success_count: 0,
+  error_count: 0,
+  last_status: 'idle' as 'idle' | 'running' | 'ok' | 'error',
+  last_code: 0,
+  last_duration_ms: 0,
+  last_message: '' as string,
+};
+
+// --- Core refresh function --------------------------------------------------
+async function refreshNow(source: 'startup' | 'interval' | 'manual' = 'interval') {
+  const started = Date.now();
+  metrics.last_run_at = started;
+  metrics.last_status = 'running';
+
   try {
-    const stRes = await fetch(`${API}/api/qbo/status`);
-    if (!stRes.ok) {
-      const text = await stRes.text();
-      console.error('[refresher] status failed', stRes.status, text);
-      return;
-    }
-    const st: any = await stRes.json(); // response shape is controlled by our API
-    if (!st.hasToken) {
-      console.log('[refresher] no token yet');
-      return;
-    }
-    const left = Number(st.seconds_until_expiry ?? 0);
-    if (left < THRESHOLD_S) {
-      const r = await fetch(`${API}/api/qbo/refresh`, {
-        method: 'POST',
-        headers: { 'x-admin-key': ADMIN_KEY },
-      });
-      if (!r.ok) {
-        const t = await r.text();
-        console.error('[refresher] refresh failed', r.status, t);
-      } else {
-        console.log('[refresher] refreshed successfully');
-      }
+    const res = await fetch(`${API_BASE}/api/qbo/refresh`, {
+      method: 'POST',
+      headers: {
+        'X-Cron-Secret': QBO_CRON_SECRET,
+      },
+    });
+
+    metrics.last_code = res.status;
+    const text = await res.text();
+    metrics.last_message = text;
+    metrics.last_duration_ms = Date.now() - started;
+
+    if (res.ok) {
+      metrics.success_count += 1;
+      metrics.last_ok_at = Date.now();
+      metrics.last_status = 'ok';
     } else {
-      console.log(`[refresher] ${left}s left, no action`);
+      metrics.error_count += 1;
+      metrics.last_error_at = Date.now();
+      metrics.last_status = 'error';
     }
-  } catch (e) {
-    console.error('[refresher] error', e);
+  } catch (err: any) {
+    metrics.error_count += 1;
+    metrics.last_error_at = Date.now();
+    metrics.last_status = 'error';
+    metrics.last_message = String(err?.message ?? err);
+    metrics.last_duration_ms = Date.now() - started;
   }
 }
 
-async function loop() {
-  for (;;) {
-    await once();
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
-  }
-}
+// --- HTTP server ------------------------------------------------------------
+const app = express();
 
-loop().catch(e => console.error('[refresher] fatal', e));
+app.get('/healthz', (_req, res) => {
+  // "ok" if we had a success in the last ~62 minutes
+  const okRecently = metrics.last_ok_at > 0 && (Date.now() - metrics.last_ok_at) < (62 * 60 * 1000);
+  res.json({
+    ok: okRecently,
+    live: true,
+    api_base: API_BASE,
+    last_ok_at: metrics.last_ok_at,
+    last_error_at: metrics.last_error_at,
+  });
+});
+
+app.get('/metrics', (_req, res) => {
+  res.json(metrics);
+});
+
+app.post('/run', async (_req, res) => {
+  await refreshNow('manual');
+  res.json({ ok: metrics.last_status === 'ok', ...metrics });
+});
+
+// Try to bind; if port in use, log and exit (so PM2 can restart on a new port if you change env)
+app
+  .listen(PORT, () => {
+    console.log(`[refresher] listening on :${PORT} (API_BASE=${API_BASE}, every ${INTERVAL_MS}ms)`);
+  })
+  .on('error', (e: any) => {
+    if (e?.code === 'EADDRINUSE') {
+      console.error(`[refresher] port ${PORT} in use, exiting`);
+      process.exit(1);
+    }
+    throw e;
+  });
+
+// --- Scheduler --------------------------------------------------------------
+const jitter = Math.round(Math.random() * 8000) + 2000; // 2–10s
+setTimeout(() => {
+  refreshNow('startup').catch(() => {});
+  setInterval(() => {
+    metrics.ticks += 1;
+    refreshNow('interval').catch(() => {});
+  }, INTERVAL_MS);
+}, jitter);
+

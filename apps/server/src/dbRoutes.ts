@@ -1,147 +1,164 @@
-import { Router } from "express";
-import { pool } from "./db.js";
+// apps/server/src/dbRoutes.ts
+import { Router, type Request, type Response } from 'express';
+import { pool } from './db.js';
 
 const router = Router();
 
-// small helper to coerce & clamp
-function num(v: any, d: number, min = 0, max = 10_000) {
-  const n = Number.parseInt(String(v ?? ""), 10);
-  if (Number.isNaN(n)) return d;
-  return Math.max(min, Math.min(max, n));
+/** GET /api/db/health */
+router.get('/health', async (_req: Request, res: Response) => {
+  try {
+    await pool.query('SELECT 1');
+    return res.json({ ok: true, db: 'ok' });
+  } catch {
+    return res.status(500).json({ ok: false, db: 'down' });
+  }
+});
+
+// Helpers
+function parseLimit(v: unknown, d = 25, max = 200) {
+  const n = Math.max(1, Math.min(max, parseInt(String(v ?? d), 10)));
+  return Number.isFinite(n) ? n : d;
+}
+function parseOffset(v: unknown) {
+  const n = Math.max(0, parseInt(String(v ?? 0), 10));
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
- * GET /api/db/customers?limit=20&offset=0&q=zor
+ * GET /api/db/customers?limit=&offset=&q=
+ * NOTE: adjust table name if yours differs.
  */
-router.get("/customers", async (req, res) => {
+router.get('/customers', async (req: Request, res: Response) => {
   try {
-    const limit = num(req.query.limit, 20, 1, 200);
-    const offset = num(req.query.offset, 0, 0, 100_000);
-    const q = String(req.query.q ?? "").trim();
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
+    const q = String(req.query.q || '').trim();
 
-    const where = q
-      ? `WHERE LOWER(display_name) LIKE LOWER($1) OR LOWER(email) LIKE LOWER($1)`
-      : "";
-    const args = q ? [`%${q}%`, limit, offset] : [limit, offset];
+    const params: any[] = [];
+    let where = '';
+    if (q) {
+      params.push(`%${q.toLowerCase()}%`);
+      where = `
+        WHERE lower(display_name) LIKE $${params.length}
+           OR lower(coalesce(given_name, '')) LIKE $${params.length}
+           OR lower(coalesce(family_name, '')) LIKE $${params.length}
+           OR lower(coalesce(email, '')) LIKE $${params.length}
+           OR lower(coalesce(phone, '')) LIKE $${params.length}
+      `;
+    }
 
+    const totalSql = `SELECT count(*)::int AS c FROM public.qbo_customers ${where}`;
+    const { rows: totalRows } = await pool.query<{ c: number }>(totalSql, params);
+    const total = totalRows[0]?.c ?? 0;
+
+    params.push(limit, offset);
     const dataSql = `
       SELECT qbo_id, display_name, given_name, family_name, email, phone, active, updated_at
-      FROM qbo_customers
-      ${where ? " " + where : ""}
-      ORDER BY updated_at DESC
-      LIMIT $${where ? 2 : 1} OFFSET $${where ? 3 : 2};
+      FROM public.qbo_customers
+      ${where}
+      ORDER BY updated_at DESC NULLS LAST, display_name ASC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
     `;
-    const countSql = `
-      SELECT COUNT(*)::int AS total
-      FROM qbo_customers
-      ${where ? " " + where : ""};
-    `;
+    const { rows } = await pool.query(dataSql, params);
 
-    const [dataRes, countRes] = await Promise.all([
-      pool.query(dataSql, args),
-      pool.query(countSql, where ? [args[0]] : []),
-    ]);
-
-    res.json({
-      ok: true,
-      total: countRes.rows[0]?.total ?? 0,
-      limit,
-      offset,
-      data: dataRes.rows,
-    });
-  } catch (e) {
-    console.error("GET /db/customers", e);
-    res.status(500).json({ ok: false, error: "internal_error" });
+    return res.json({ ok: true, total, limit, offset, data: rows });
+  } catch (err) {
+    console.error('GET /api/db/customers error:', err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
 /**
- * GET /api/db/invoices?limit=20&offset=0&q=513
- * (q searches by customer_ref or doc_number loosely)
+ * GET /api/db/invoices?limit=&offset=&q=
+ * NOTE: adjust table name if yours differs.
  */
-router.get("/invoices", async (req, res) => {
+router.get('/invoices', async (req: Request, res: Response) => {
   try {
-    const limit = num(req.query.limit, 20, 1, 200);
-    const offset = num(req.query.offset, 0);
-    const q = String(req.query.q ?? "").trim();
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
+    const q = String(req.query.q || '').trim();
 
-    const where = q
-      ? `WHERE doc_number ILIKE $1 OR customer_ref::text ILIKE $1`
-      : "";
-    const args = q ? [`%${q}%`, limit, offset] : [limit, offset];
+    const params: any[] = [];
+    let where = '';
+    if (q) {
+      params.push(`%${q.toLowerCase()}%`);
+      where = `
+        WHERE lower(coalesce(status,'')) LIKE $${params.length}
+           OR lower(coalesce(doc_number,'')) LIKE $${params.length}
+           OR lower(coalesce(customer_ref,'')) LIKE $${params.length}
+      `;
+    }
 
+    const totalSql = `SELECT count(*)::int AS c FROM public.qbo_invoices ${where}`;
+    const { rows: totalRows } = await pool.query<{ c: number }>(totalSql, params);
+    const total = totalRows[0]?.c ?? 0;
+
+    params.push(limit, offset);
     const dataSql = `
-      SELECT qbo_id, doc_number, customer_ref, txn_date, due_date, balance, total_amt, status, updated_at
-      FROM qbo_invoices
-      ${where ? " " + where : ""}
-      ORDER BY txn_date DESC NULLS LAST, updated_at DESC
-      LIMIT $${where ? 2 : 1} OFFSET $${where ? 3 : 2};
+      SELECT
+        qbo_id,
+        doc_number,
+        customer_ref,
+        txn_date,
+        due_date,
+        balance,
+        total_amt,
+        status,
+        updated_at
+      FROM public.qbo_invoices
+      ${where}
+      ORDER BY txn_date DESC NULLS LAST, updated_at DESC NULLS LAST
+      LIMIT $${params.length - 1} OFFSET $${params.length}
     `;
-    const countSql = `
-      SELECT COUNT(*)::int AS total
-      FROM qbo_invoices
-      ${where ? " " + where : ""};
-    `;
+    const { rows } = await pool.query(dataSql, params);
 
-    const [dataRes, countRes] = await Promise.all([
-      pool.query(dataSql, args),
-      pool.query(countSql, where ? [args[0]] : []),
-    ]);
-
-    res.json({
-      ok: true,
-      total: countRes.rows[0]?.total ?? 0,
-      limit,
-      offset,
-      data: dataRes.rows,
-    });
-  } catch (e) {
-    console.error("GET /db/invoices", e);
-    res.status(500).json({ ok: false, error: "internal_error" });
+    return res.json({ ok: true, total, limit, offset, data: rows });
+  } catch (err) {
+    console.error('GET /api/db/invoices error:', err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
 /**
- * GET /api/db/items?limit=20&offset=0&q=tyvek
+ * GET /api/db/items?limit=&offset=&q=
+ * NOTE: adjust table name if yours differs.
  */
-router.get("/items", async (req, res) => {
+router.get('/items', async (req: Request, res: Response) => {
   try {
-    const limit = num(req.query.limit, 20, 1, 200);
-    const offset = num(req.query.offset, 0);
-    const q = String(req.query.q ?? "").trim();
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
+    const q = String(req.query.q || '').trim();
 
-    const where = q ? `WHERE name ILIKE $1` : "";
-    const args = q ? [`%${q}%`, limit, offset] : [limit, offset];
+    const params: any[] = [];
+    let where = '';
+    if (q) {
+      params.push(`%${q.toLowerCase()}%`);
+      where = `
+        WHERE lower(coalesce(name,'')) LIKE $${params.length}
+           OR lower(coalesce(type,'')) LIKE $${params.length}
+      `;
+    }
 
+    const totalSql = `SELECT count(*)::int AS c FROM public.qbo_items ${where}`;
+    const { rows: totalRows } = await pool.query<{ c: number }>(totalSql, params);
+    const total = totalRows[0]?.c ?? 0;
+
+    params.push(limit, offset);
     const dataSql = `
       SELECT qbo_id, name, type, active, updated_at
-      FROM qbo_items
-      ${where ? " " + where : ""}
-      ORDER BY updated_at DESC
-      LIMIT $${where ? 2 : 1} OFFSET $${where ? 3 : 2};
+      FROM public.qbo_items
+      ${where}
+      ORDER BY updated_at DESC NULLS LAST, name ASC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
     `;
-    const countSql = `
-      SELECT COUNT(*)::int AS total
-      FROM qbo_items
-      ${where ? " " + where : ""};
-    `;
+    const { rows } = await pool.query(dataSql, params);
 
-    const [dataRes, countRes] = await Promise.all([
-      pool.query(dataSql, args),
-      pool.query(countSql, where ? [args[0]] : []),
-    ]);
-
-    res.json({
-      ok: true,
-      total: countRes.rows[0]?.total ?? 0,
-      limit,
-      offset,
-      data: dataRes.rows,
-    });
-  } catch (e) {
-    console.error("GET /db/items", e);
-    res.status(500).json({ ok: false, error: "internal_error" });
+    return res.json({ ok: true, total, limit, offset, data: rows });
+  } catch (err) {
+    console.error('GET /api/db/items error:', err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
 export default router;
+
