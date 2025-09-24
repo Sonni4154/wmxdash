@@ -1,37 +1,38 @@
+
 # syntax=docker/dockerfile:1
 
-## Base image with Node and pnpm enabled. The build stage will install
-## dependencies for all packages in the workspace. We rely on pnpm as
-## the package manager to keep node_modules efficient across services.
+# --- base: Node + pnpm ---
 FROM node:20-slim AS base
 WORKDIR /app
-# Copy root manifests required to bootstrap the workspace. The
-# pnpm-lock.yaml file must exist at the repository root to ensure
-# reproducible builds. If you haven't yet generated a lockfile run
-# `pnpm install` locally.
-COPY package.json pnpm-workspace.yaml ./
-COPY tsconfig.base.json ./
+# If you keep a lockfile, COPY it too for better caching:
+# COPY pnpm-lock.yaml ./
+COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
 RUN corepack enable && corepack prepare pnpm@10.17.0 --activate
 
-# --- build all workspaces ---
+# --- builder: compile a specific workspace (and its deps) ---
+# Pass APP_FILTER at build time, e.g. @wmx/server or @wmx/refresher
 FROM base AS builder
-# Copy the entire repository into the image. This stage contains
-# everything needed to compile all apps and packages.
+ARG APP_FILTER=@wmx/server
+# bring all sources
 COPY . .
-# Install and build all packages. We disable frozen lockfile so that
-# developers can iterate without committing lockfile changes during local
-# development. In CI you should enable `--frozen-lockfile`.
-#RUN pnpm -r install --no-frozen-lockfile
-#RUN pnpm -r build
-# only build the server (and its deps)
-RUN pnpm -r --filter @wmx/server... install --no-frozen-lockfile
-RUN pnpm -r --filter @wmx/server... build
-# --- final runtime ---
-FROM base AS app
-COPY --from=builder /app /app
+# Install deps for the target workspace and its dependency graph
+# (no frozen lockfile to keep local iteration easy; switch to --frozen-lockfile in CI)
+RUN pnpm -r --filter ${APP_FILTER}... install --no-frozen-lockfile
+# Build the target workspace
+RUN pnpm -r --filter ${APP_FILTER}... build
+
+# --- app: thin runtime with the built code ---
+FROM node:20-slim AS app
+WORKDIR /app
 ENV NODE_ENV=production
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends tini curl \
  && rm -rf /var/lib/apt/lists/*
-# The actual command is specified in docker-compose.yml. See that file
-# for the entrypoint and arguments for each service.
+RUN corepack enable && corepack prepare pnpm@10.17.0 --activate
+
+# copy the whole repo from builder (includes node_modules + dist for target workspace)
+COPY --from=builder /app /app
+
+ENTRYPOINT ["/usr/bin/tini","--"]
+# The actual command is provided by docker-compose per-service.
+

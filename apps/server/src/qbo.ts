@@ -1,7 +1,12 @@
+// apps/server/src/qbo.ts
 import { Pool } from 'pg';
+import { createRequire } from 'module';
+
+// Allow requiring CommonJS modules (node-quickbooks) from ESM
+const require = createRequire(import.meta.url);
+const QuickBooks = require('node-quickbooks');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const QuickBooks = require('node-quickbooks');
 
 async function ensureIntegrationId(): Promise<string> {
   const provider = process.env.INTEGRATION_PROVIDER || 'quickbooks';
@@ -37,7 +42,6 @@ export async function getQbo() {
   const useSandbox = (process.env.QBO_USE_SANDBOX || 'false') === 'true';
   const debug = (process.env.QBO_DEBUG || 'false') === 'true';
 
-  // node-quickbooks OAuth2 signature:
   // QuickBooks(consumerKey, consumerSecret, oauth_token, oauth_token_secret(false), realmId,
   //            useSandbox, debug, minorVersion|null, '2.0', refresh_token)
   const qbo = new (QuickBooks as any)(
@@ -48,6 +52,7 @@ export async function getQbo() {
     realmId,
     useSandbox,
     debug,
+    // If you ever see 400s about minor version, change null -> '70'
     null,
     '2.0',
     t.refresh_token
@@ -59,13 +64,13 @@ export async function getQbo() {
 /* ---------------- Upserts ---------------- */
 
 export async function upsertCustomers(customers: any[]) {
-  if (customers.length === 0) return { inserted: 0, updated: 0 };
+  if (!Array.isArray(customers) || customers.length === 0) return { inserted: 0, updated: 0 };
   const client = await pool.connect();
   try {
     let ins = 0, upd = 0;
     for (const c of customers) {
       const qbo_id = String(c.Id);
-      const res = await client.query(
+      await client.query(
         `INSERT INTO qbo_customers
            (qbo_id, display_name, given_name, family_name, email, phone, active, raw)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -89,8 +94,6 @@ export async function upsertCustomers(customers: any[]) {
           c
         ]
       );
-      // If nothing conflicted, rowCount=1 is an insert; on conflict rowCount is also 1.
-      // Track via presence in table before insert if you want exact counts; keep it simple:
       ins++;
     }
     return { inserted: ins, updated: upd };
@@ -100,6 +103,7 @@ export async function upsertCustomers(customers: any[]) {
 }
 
 export async function upsertItems(items: any[]) {
+  if (!Array.isArray(items) || items.length === 0) return { upserted: 0 };
   const client = await pool.connect();
   try {
     let n = 0;
@@ -135,6 +139,7 @@ export async function upsertItems(items: any[]) {
 }
 
 export async function upsertInvoices(invoices: any[]) {
+  if (!Array.isArray(invoices) || invoices.length === 0) return { upserted: 0 };
   const client = await pool.connect();
   try {
     let n = 0;
@@ -164,7 +169,7 @@ export async function upsertInvoices(invoices: any[]) {
         ]
       );
 
-      // lines (wipe & re-add; simple and safe)
+      // wipe & re-add invoice lines
       await client.query(`DELETE FROM qbo_invoice_lines WHERE invoice_qbo_id = $1`, [String(inv.Id)]);
       const lines = Array.isArray(inv.Line) ? inv.Line : [];
       let ln = 0;
@@ -194,7 +199,7 @@ export async function upsertInvoices(invoices: any[]) {
   }
 }
 
-/* -------------- tiny promise wrappers around node-quickbooks -------------- */
+/* ---------------- SDK wrappers + normalization ---------------- */
 
 function asPromise<T>(fn: Function, ...args: any[]): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -202,21 +207,43 @@ function asPromise<T>(fn: Function, ...args: any[]): Promise<T> {
   });
 }
 
-export async function fetchAllCustomers() {
-  const { qbo } = await getQbo();
-  const out = await asPromise<any[]>(qbo.findCustomers, { fetchAll: true });
-  return out;
+// Normalize node-quickbooks find* responses into arrays.
+function pluckArray(resp: any, key: string): any[] {
+  if (!resp) return [];
+  if (Array.isArray(resp)) return resp;
+  if (resp.QueryResponse && Array.isArray(resp.QueryResponse[key])) return resp.QueryResponse[key];
+  if (Array.isArray(resp[key])) return resp[key];
+  return [];
 }
 
-export async function fetchAllItems() {
+export async function fetchAllCustomers(): Promise<any[]> {
   const { qbo } = await getQbo();
-  const out = await asPromise<any[]>(qbo.findItems, { fetchAll: true });
-  return out;
+  const resp = await asPromise<any>((qbo as any).findCustomers.bind(qbo), { fetchAll: true });
+  return pluckArray(resp, 'Customer');
 }
 
-export async function fetchAllInvoices() {
+export async function fetchAllItems(): Promise<any[]> {
   const { qbo } = await getQbo();
-  const out = await asPromise<any[]>(qbo.findInvoices, { fetchAll: true });
-  return out;
+  const resp = await asPromise<any>((qbo as any).findItems.bind(qbo), { fetchAll: true });
+  return pluckArray(resp, 'Item');
+}
+
+export async function fetchAllInvoices(): Promise<any[]> {
+  const { qbo } = await getQbo();
+  const resp = await asPromise<any>((qbo as any).findInvoices.bind(qbo), { fetchAll: true });
+  return pluckArray(resp, 'Invoice');
+}
+
+// Optional utility used by /api/qbo/company diag
+export async function getCompanyInfo(): Promise<any> {
+  const { qbo, realmId } = await getQbo();
+  if (typeof (qbo as any).getCompanyInfo === 'function') {
+    return await new Promise<any>((resolve, reject) => {
+      (qbo as any).getCompanyInfo(realmId, (err: any, data: any) => (err ? reject(err) : resolve(data)));
+    });
+  }
+  // Fallback via SQL query
+  const resp = await asPromise<any>((qbo as any).query.bind(qbo), `SELECT * FROM CompanyInfo`);
+  return resp?.QueryResponse?.CompanyInfo?.[0] ?? resp;
 }
 

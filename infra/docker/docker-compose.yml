@@ -19,6 +19,28 @@ services:
     networks:
       - wmxnet
 
+  # one-shot migrations runner (applies /sql/*.sql)
+  migrations:
+    image: employee-dashboard-api
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: app
+      args:
+        APP_FILTER: "@wmx/server"
+    command: ["sh","-lc","node apps/server/dist/migrate.js"]
+    env_file:
+      - ./.env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - wmxnet
+
   api:
     image: employee-dashboard-api
     build:
@@ -26,7 +48,7 @@ services:
       dockerfile: infra/docker/Dockerfile
       target: app
       args:
-        APP_PATH: apps/server
+        APP_FILTER: "@wmx/server"
     command: ["sh","-lc","node apps/server/dist/index.js"]
     env_file:
       - ./.env
@@ -37,6 +59,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -53,10 +77,9 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
-    # if your Dockerfile uses APP_PATH for multi-build, keep the args:
       target: app
       args:
-        APP_PATH: apps/refresher
+        APP_FILTER: "@wmx/refresher"
     command: ["sh","-lc","pnpm -C apps/refresher build && pnpm -C apps/refresher start"]
     env_file:
       - ./.env
@@ -71,50 +94,15 @@ services:
     networks:
       - wmxnet
     healthcheck:
-     test: ["CMD", "node", "-e", "fetch('http://api:3000/api/qbo/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-     interval: 30s
-     timeout: 5s
-     retries: 5
-     start_period: 20s
-
-#  web:
-#    image: employee-dashboard-web
-#    build:
-#      context: ../..
-#      dockerfile: infra/docker/Dockerfile
-#      target: app
-#      args:
-#        APP_PATH: apps/web
-#    command: ["pnpm", "-C", "apps/web", "start"]
-#    env_file:
-#      - ./.env
-#    environment:
-#      NODE_ENV: production
-#      PORT: "5173"
-#    depends_on:
-#      api:
-#        condition: service_started
-#    ports:
-#      - "5173:5173"
-#    restart: unless-stopped
-#    healthcheck:
-#      test:
-#        - CMD
-#        - node
-#        - -e
-#        - |
-#          fetch('http://127.0.0.1:5173/')
-#            .then(r => process.exit(r.ok ? 0 : 1))
-#            .catch(() => process.exit(1));
-#      interval: 30s
-#      timeout: 5s
-#      retries: 5
-#      start_period: 20s
-#    networks: [wmxnet]
+      test: ["CMD", "node", "-e", "fetch('http://api:3000/api/qbo/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 networks:
   wmxnet:
-   driver: bridge
+    driver: bridge
 
 volumes:
   pgdata:

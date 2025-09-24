@@ -1,205 +1,128 @@
-// apps/server/src/qboClient.ts
-import QuickBooks from 'node-quickbooks';
-import { Pool } from 'pg';
+import { getQbo } from './qbo.js';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+type QueryOpts = {
+  fetchAll?: boolean;
+  limit?: number;
+  offset?: number;
+  orderBy?: string;
+};
 
-const INTEGRATION_PROVIDER = process.env.INTEGRATION_PROVIDER || 'quickbooks';
-// NOTE: org_id is a UUID in the DB; your .env already sets this.
-const INTEGRATION_ORG_ID = process.env.INTEGRATION_ORG_ID || '';
-const USE_SANDBOX = (process.env.QBO_SANDBOX || 'false').toLowerCase() === 'true';
-
-/** Ensure integrations row exists and return its UUID */
-export async function getIntegrationId(): Promise<string> {
-  const upsert = await pool.query<{ id: string }>(
-    `
-    INSERT INTO integrations (provider, org_id)
-    VALUES ($1, $2::uuid)
-    ON CONFLICT (provider, org_id) DO UPDATE SET updated_at = now()
-    RETURNING id
-    `,
-    [INTEGRATION_PROVIDER, INTEGRATION_ORG_ID]
-  );
-  return upsert.rows[0].id;
+function asPromise<T>(fn: Function, ...args: any[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    fn.call(null, ...args, (e: any, res: T) => (e ? reject(e) : resolve(res)));
+  });
 }
 
-/** Get the latest token row for this integration */
-async function loadTokens(integrationId: string) {
-  const { rows } = await pool.query<{
-    access_token: string;
-    refresh_token: string;
-    realm_id: string;
-    expires_at: Date;
-  }>(
-    `
-    SELECT access_token, refresh_token, realm_id, expires_at
-    FROM qbo_tokens
-    WHERE integration_id = $1
-    ORDER BY updated_at DESC
-    LIMIT 1
-    `,
-    [integrationId]
-  );
-  return rows[0] || null;
+function buildQboSql(entity: string, opts: QueryOpts = {}): string {
+  const limit = Number.isFinite(opts.limit) ? Math.max(1, Number(opts.limit)) : 100;
+  const offset = Number.isFinite(opts.offset) ? Math.max(0, Number(opts.offset)) : 0;
+  const startPos = offset + 1;
+  const orderBy = opts.orderBy ? ` ORDER BY ${opts.orderBy}` : '';
+  return `SELECT * FROM ${entity} ${orderBy} STARTPOSITION ${startPos} MAXRESULTS ${limit}`;
 }
 
-/** Persist newly refreshed tokens from Intuit */
-export async function persistTokens(
-  integrationId: string,
-  data: { access_token: string; refresh_token: string; expires_in: number; realm_id?: string }
-) {
-  const expires_at = new Date(Date.now() + (Number(data.expires_in ?? 3600) - 60) * 1000);
-  await pool.query(
-    `
-    INSERT INTO qbo_tokens (integration_id, access_token, refresh_token, expires_at, realm_id)
-    VALUES ($1, $2, $3, $4, COALESCE($5,''))
-    ON CONFLICT (integration_id) DO UPDATE SET
-      access_token = EXCLUDED.access_token,
-      refresh_token = EXCLUDED.refresh_token,
-      expires_at    = EXCLUDED.expires_at,
-      realm_id      = COALESCE(EXCLUDED.realm_id, qbo_tokens.realm_id),
-      version       = qbo_tokens.version + 1,
-      updated_at    = now()
-    `,
-    [integrationId, data.access_token, data.refresh_token, expires_at, data.realm_id ?? null]
-  );
-}
+export async function qboQuery(entityRaw: string, opts: QueryOpts = {}) {
+  const entity = String(entityRaw || '').trim().toLowerCase();
+  const { qbo } = await getQbo();
 
-/** Build a QuickBooks client using current DB tokens (OAuth 2.0) */
-export async function makeQboClient(): Promise<any> {
-  const integrationId = await getIntegrationId();
-  const tokens = await loadTokens(integrationId);
-  if (!tokens) throw new Error('No QBO tokens found. Run /api/qbo/refresh first.');
+  const useFindApi = (method: string, args: any = {}) =>
+    asPromise<any[]>((qbo as any)[method].bind(qbo), args);
 
-  const args: any[] = [
-    process.env.QBO_CLIENT_ID!,
-    process.env.QBO_CLIENT_SECRET!,
-    tokens.access_token,
-    false,
-    tokens.realm_id || INTEGRATION_ORG_ID,
-    USE_SANDBOX,
-    false,
-    null,
-    '2.0',
-    tokens.refresh_token,
-  ];
+  switch (entity) {
+    case 'customer':
+    case 'customers':
+      return opts.fetchAll
+        ? useFindApi('findCustomers', { fetchAll: true })
+        : asPromise<any[]>((qbo as any).findCustomers.bind(qbo), { limit: opts.limit, offset: opts.offset });
 
-  const qbo: any = new (QuickBooks as any)(...args);
+    case 'item':
+    case 'items':
+      return opts.fetchAll
+        ? useFindApi('findItems', { fetchAll: true })
+        : asPromise<any[]>((qbo as any).findItems.bind(qbo), { limit: opts.limit, offset: opts.offset });
 
-  // On-demand refresh helper for 401s
-  qbo.__refreshOn401 = async (err: any) => {
-    const status = err?.status ?? err?.code;
-    if (Number(status) !== 401) return qbo;
+    case 'invoice':
+    case 'invoices':
+      return opts.fetchAll
+        ? useFindApi('findInvoices', { fetchAll: true })
+        : asPromise<any[]>((qbo as any).findInvoices.bind(qbo), { limit: opts.limit, offset: opts.offset });
 
-    const resp = await fetch('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
-      method: 'POST',
-      headers: {
-        Authorization:
-          'Basic ' +
-          Buffer.from(`${process.env.QBO_CLIENT_ID}:${process.env.QBO_CLIENT_SECRET}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: tokens.refresh_token ?? '',
-      }),
-    });
+    case 'vendor':
+    case 'vendors':
+      return opts.fetchAll
+        ? useFindApi('findVendors', { fetchAll: true })
+        : asPromise<any[]>((qbo as any).findVendors.bind(qbo), { limit: opts.limit, offset: opts.offset });
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`QBO token refresh failed: ${resp.status} ${text}`);
+    case 'account':
+    case 'accounts':
+      return opts.fetchAll
+        ? useFindApi('findAccounts', { fetchAll: true })
+        : asPromise<any[]>((qbo as any).findAccounts.bind(qbo), { limit: opts.limit, offset: opts.offset });
+
+    case 'estimate':
+    case 'estimates': {
+      if (typeof (qbo as any).findEstimates === 'function') {
+        return opts.fetchAll
+          ? useFindApi('findEstimates', { fetchAll: true })
+          : asPromise<any[]>((qbo as any).findEstimates.bind(qbo), { limit: opts.limit, offset: opts.offset });
+      }
+      const sql = buildQboSql('Estimate', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
     }
 
-    const data = (await resp.json()) as {
-      access_token: string;
-      refresh_token?: string;
-      expires_in: number;
-      realmId?: string;
-    };
+    case 'payment':
+    case 'payments': {
+      const sql = buildQboSql('Payment', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
 
-    await persistTokens(integrationId, {
-      access_token: data.access_token,
-      refresh_token: data.refresh_token || tokens.refresh_token,
-      expires_in: data.expires_in,
-      realm_id: data.realmId || tokens.realm_id || INTEGRATION_ORG_ID,
-    });
+    case 'bill':
+    case 'bills': {
+      const sql = buildQboSql('Bill', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
 
-    return makeQboClient();
-  };
+    case 'purchase':
+    case 'purchases': {
+      const sql = buildQboSql('Purchase', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
 
-  return qbo;
-}
+    case 'journalentry':
+    case 'journalentries': {
+      const sql = buildQboSql('JournalEntry', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
 
-/** Wrapper for list-style queries using node-quickbooks "find*" methods */
-export async function qboQuery(entity: string, opts: Record<string, any> = {}): Promise<any> {
-  const qbo = await makeQboClient();
+    case 'timeactivity':
+    case 'timeactivities': {
+      const sql = buildQboSql('TimeActivity', opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
 
-  const methodMap: Record<string, string> = {
-    customer: 'findCustomers',
-    customers: 'findCustomers',
-    vendor: 'findVendors',
-    vendors: 'findVendors',
-    item: 'findItems',
-    items: 'findItems',
-    invoice: 'findInvoices',
-    invoices: 'findInvoices',
-    account: 'findAccounts',
-    accounts: 'findAccounts',
-    payment: 'findPayments',
-    payments: 'findPayments',
-    estimate: 'findEstimates',
-    estimates: 'findEstimates',
-    bill: 'findBills',
-    bills: 'findBills',
-    purchase: 'findPurchases',
-    purchases: 'findPurchases',
-    journalentry: 'findJournalEntries',
-    journalentries: 'findJournalEntries',
-    timeactivity: 'findTimeActivities',
-    timeactivities: 'findTimeActivities',
-  };
-
-  const m = methodMap[entity.toLowerCase()];
-  if (!m || typeof (qbo as any)[m] !== 'function') {
-    throw new Error(`Unsupported entity for qboQuery: ${entity}`);
-  }
-
-  const call = () =>
-    new Promise<any>((resolve, reject) => {
-      (qbo as any)[m](opts, (err: any, resp: any) => (err ? reject(err) : resolve(resp)));
-    });
-
-  try {
-    return await call();
-  } catch (e: any) {
-    const again = await (qbo as any).__refreshOn401?.(e);
-    return await new Promise<any>((resolve, reject) => {
-      (again as any)[m](opts, (err: any, resp: any) => (err ? reject(err) : resolve(resp)));
-    });
+    default: {
+      const sqlEntity = entity.charAt(0).toUpperCase() + entity.slice(1);
+      const sql = buildQboSql(sqlEntity, opts);
+      return asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+    }
   }
 }
 
-/** Wrapper for Change Data Capture (CDC) */
-export async function qboCDC(entities: string[], sinceISO: string): Promise<any> {
-  const qbo = await makeQboClient();
+export async function qboCDC(entities: string[], sinceISO: string) {
+  const { qbo } = await getQbo();
+  const out: Record<string, any[]> = {};
+  const since = new Date(sinceISO).toISOString();
 
-  const call = () =>
-    new Promise<any>((resolve, reject) => {
-      (qbo as any).changeDataCapture(entities, sinceISO, (err: any, resp: any) =>
-        err ? reject(err) : resolve(resp)
-      );
-    });
-
-  try {
-    return await call();
-  } catch (e: any) {
-    const again = await (qbo as any).__refreshOn401?.(e);
-    return await new Promise<any>((resolve, reject) => {
-      (again as any).changeDataCapture(entities, sinceISO, (err: any, resp: any) =>
-        err ? reject(err) : resolve(resp)
-      );
-    });
+  for (const e of entities) {
+    const entity = e === 'JournalEntries' ? 'JournalEntry' : e === 'TimeActivities' ? 'TimeActivity' : e;
+    const sql = `SELECT * FROM ${entity} WHERE MetaData.LastUpdatedTime > '${since}' ORDER BY MetaData.LastUpdatedTime`;
+    try {
+      const rows = await asPromise<any[]>((qbo as any).query.bind(qbo), sql);
+      out[entity] = rows || [];
+    } catch {
+      out[entity] = [];
+    }
   }
+  return out;
 }
 

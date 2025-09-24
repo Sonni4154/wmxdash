@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS qbo_tokens (
+  id BIGSERIAL PRIMARY KEY,
+  token TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
