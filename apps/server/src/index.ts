@@ -30,19 +30,14 @@ export type IntuitTokenResponse = {
 };
 
 const app = express();
-app.use('/api/db', dbRoutes);
-app.use("/api/time", timeRoutes);
-
-// JSON for most routes
 app.use(express.json({ limit: '1mb' }));
-// Cookies for OAuth state
 app.use(cookieParser());
 
-// Mount OAuth (connect + callback)
-app.use(oauthRouter);
+app.use('/api/db', dbRoutes);
+app.use('/api/time', timeRoutes);
 
-// Mount webhook with RAW body just for this path (required for HMAC verification)
-app.post('/api/webhooks/quickbooks', rawBody({ type: 'application/json' }), webhookRouter);
+app.use(oauthRouter);
+app.use('/api/webhooks', rawBody({ type: '*/*' }), webhookRouter);
 
 // Mount QBO read APIs (/api/qbo/* including /api/qbo/cdc and entity list)
 mountQboRoutes(app);
