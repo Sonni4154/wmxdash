@@ -83,7 +83,7 @@ app.get('/api/integrations', async (_req: Request, res: Response) => {
       );
       if (rows.length) {
         return res.json(
-          rows.map((r) => ({
+          rows.map((r: any) => ({
             provider: r.provider,
             status: 'connected',
             org_id: r.org_id,
@@ -163,7 +163,7 @@ app.get('/api/products', async (_req: Request, res: Response) => {
           LIMIT 50`,
       );
       return res.json(
-        rows.map((r) => ({
+        rows.map((r: any) => ({
           id: r.id,
           name: r.name,
           sku: r.sku,
@@ -192,7 +192,7 @@ app.get('/api/invoices', async (_req: Request, res: Response) => {
           LIMIT 50`,
       );
       return res.json(
-        rows.map((r) => ({
+        rows.map((r: any) => ({
           id: r.id,
           customer: r.customer_name,
           total: Number(r.total_cents) / 100,
