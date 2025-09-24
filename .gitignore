@@ -42,3 +42,6 @@ node_modules/
 
 # Never commit envs
 infra/docker/.env
+
+# Never commit envs
+infra/docker/.env

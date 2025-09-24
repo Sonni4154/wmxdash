@@ -1,0 +1,250 @@
+Write-up: what we changed (so far)
+Docker & orchestration
+
+docker-compose now spins up:
+
+db (Postgres 16) with healthcheck + volume.
+
+api (apps/server) built via a multi-stage Dockerfile.
+
+migrations one-shot container that compiles server and runs SQL bootstrap automatically on up.
+
+refresher (internal token refresher) that calls the API admin refresh endpoint on a schedule.
+
+tokenmgr (qbo-token-manager) remains internal; we reference it via internal URL if needed (not exposed).
+
+Dockerfile standardized: Node 20-slim, pnpm via corepack, multi-stage (base → builder → app) to keep final image thin.
+
+Healthchecks on DB/API; service dependencies wired correctly.
+
+TypeScript / ESM fixes
+
+Server is ESM ("type":"module"). We made all relative imports explicit with .js and replaced any CommonJS require usage in TypeScript with:
+
+import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+This is critical for node-quickbooks (which is CJS).
+
+tsconfig adjusted so tests don’t break the rootDir build.
+
+API endpoints & behavior
+
+Admin refresh: POST /api/qbo/refresh
+
+Secured with x-admin-key: ${ADMIN_API_KEY}.
+
+Calls Intuit token endpoint, upserts qbo_tokens (official schema), extends expiry.
+
+Status: GET /api/qbo/status
+
+Reads newest token row; shows seconds_until_expiry, realm, and update time.
+
+CDC alias: GET /api/qbo-cdc → forwards to /api/qbo/cdc for backwards compatibility.
+
+Company diag: GET /api/qbo/company
+
+First tries qbo.getCompanyInfo(realmId), falls back to SELECT * FROM CompanyInfo.
+
+Sync routes:
+
+GET /api/qbo/sync/customers
+
+GET /api/qbo/sync/items
+
+GET /api/qbo/sync/invoices
+
+Each now logs precise Intuit error details and returns { error, message, detail } when something fails.
+
+QuickBooks SDK normalization
+
+node-quickbooks returns objects like { QueryResponse: { Customer: [...] } }.
+
+We added normalizers so our upserts always get arrays:
+
+fetchAllCustomers() → Customer[]
+
+fetchAllItems() → Item[]
+
+fetchAllInvoices() → Invoice[]
+
+This resolved the “customers is not iterable” error and makes the three sync routes reliable.
+
+Database & migrations
+
+Bootstrapped the “official” integration schema:
+
+integrations (provider, org_id) with unique constraint & updated_at.
+
+qbo_tokens (integration_id, access_token, refresh_token, expires_at, realm_id, version, updated_at).
+
+qbo_customers, qbo_items, qbo_invoices, and qbo_invoice_lines with ON CONFLICT upserts.
+
+Migrations container compiles the server (so it can run any TS/JS migration helpers) and then applies SQL in sql/.
+
+Testing
+
+Added vitest smoke tests so we can run:
+
+pnpm -C apps/server test
+
+Tests mock the webhook verifier warnings and exercise the main endpoints returning sensible responses.
+
+Refreshed overall project plan (updated understanding + next steps)
+Current architecture (server-side)
+
+Token flow
+qbo-token-manager (internal) & refresher keep qbo_tokens fresh. The API reads tokens from DB, not env, and exposes:
+
+/api/qbo/status for monitoring
+
+/api/qbo/refresh for manual/admin refresh
+
+Data ingestion
+SDK read endpoints + sync routes normalize and upsert into Postgres. We can later switch to CDC or webhooks for deltas.
+
+Database
+Clean, conflict-safe upserts with updated_at semantics. Separate table for invoice lines.
+
+What’s left to call this “production-ready” server
+
+CDC + webhook ingestion
+
+Keep /api/webhooks/quickbooks mounted with raw body; verify HMAC to ingest deltas.
+
+Add a scheduler (refresher or a new worker) to call QBO CDC every N minutes for safety nets.
+
+Store last successful CDC cursor per entity in a small qbo_cursors table.
+
+Indexes & performance
+
+Add indexes: qbo_customers(qbo_id), qbo_items(qbo_id), qbo_invoices(qbo_id), qbo_invoice_lines(invoice_qbo_id).
+
+Consider partial indexes for active = true, and date indexes for reporting.
+
+Observability
+
+Structured logs (pino), request IDs, and minimal metrics (prom-client → /metrics endpoint).
+
+Alerting when token is <15 min to expiry or refresh fails.
+
+Security hardening
+
+Rate-limit admin routes.
+
+CORS exact origins (already supported via CORS_ORIGIN).
+
+Production TLS at the reverse proxy (nginx/Caddy) if applicable.
+
+Configuration cleanup
+
+Keep .env local; add .env.example (no secrets) to document required vars.
+
+Add runtime checks that fail fast on missing critical envs (client ID/secret, DB URL).
+
+Frontend: how to start (and ship value quickly)
+Tech stack
+
+React + Vite for speed.
+
+TypeScript everywhere.
+
+UI: TailwindCSS + shadcn/ui components for consistent, modern look.
+
+Data fetching: TanStack Query (react-query).
+
+Auth (phase 2): Clerk/Auth0 or simple API key-guarded admin pages for internal ops.
+
+Initial pages (MVP)
+
+Overview dashboard
+
+Cards: Token status (expires in X min), last sync time, counts (customers/items/invoices), errors (if any).
+
+Chart: invoices last 30 days (paid/sent).
+
+QuickBooks
+
+Buttons to run syncs manually (call our /api/qbo/sync/*).
+
+Read-only tables (paginated): Customers, Items, Invoices (from our DB, not live SDK).
+
+Company info panel (from /api/qbo/company).
+
+Activity
+
+Simple feed pulled from a small activity table or synthetic from recent sync logs.
+
+Frontend wiring checklist
+
+Create apps/web (if not present) with Vite:
+
+pnpm create vite apps/web --template react-ts
+pnpm -C apps/web add axios @tanstack/react-query tailwindcss postcss autoprefixer
+pnpm -C apps/web dlx tailwindcss init -p
+
+
+Set VITE_API_URL pointing to your API (docker hostname from web container or Nginx path).
+
+Basic query client + axios instance:
+
+/api/qbo/status, /api/qbo/sync/*, /api/dashboard/stats, /api/customers, /api/invoices, /api/products.
+
+Add a small “Admin” panel:
+
+Shows token status, a “Refresh token” button that sends x-admin-key header (only if you want this from UI; otherwise, keep CLI-only).
+
+UX polish (quick wins)
+
+Skeleton loaders & optimistic feedback on sync buttons.
+
+Persist table filters in the URL.
+
+Recharts for simple line/area charts of revenue over time.
+
+Next big steps (roadmap)
+
+Finish ingestion loop
+
+Implement CDC polling job + webhook verification and entity routing.
+
+Add qbo_cursors and use them to fetch only changes since last run.
+
+DB-driven dashboard
+
+Replace demo endpoints with real SQL the UI needs (time-bucketed invoice totals, top customers, overdue counts).
+
+Error handling & retries
+
+Exponential backoff on Intuit 429/5xx.
+
+Mark failed sync runs in a sync_runs table; show them in the Activity feed.
+
+Frontend shipping
+
+Build the three MVP pages above, deploy behind a basic auth gate if public.
+
+Release hardening
+
+CI checks (lint, typecheck, tests) + docker build on PRs.
+
+Staging stack (compose or k8s) mirrored to prod.
+
+Handy local verification (quick curl suite)
+# API liveness
+curl -s http://localhost:3000/ ; echo
+
+# Token status
+curl -s http://localhost:3000/api/qbo/status | jq
+
+# Manual refresh (only if you want to, and from a trusted machine)
+source infra/docker/.env
+curl -s -X POST http://localhost:3000/api/qbo/refresh -H "x-admin-key: ${ADMIN_API_KEY}" | jq
+
+# SDK reachability
+curl -s http://localhost:3000/api/qbo/company | jq
+
+# Sync (expect counts)
+curl -s http://localhost:3000/api/qbo/sync/customers | jq
+curl -s http://localhost:3000/api/qbo/sync/items | jq
+curl -s http://localhost:3000/api/qbo/sync/invoices | jq
+
