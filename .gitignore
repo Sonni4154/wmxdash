@@ -1,3 +1,6 @@
+#LLM Shit
+.ragmate.env
+
 # dependencies
 /node_modules
 
@@ -36,3 +39,6 @@ Thumbs.db
 .idea/
 
 node_modules/
+
+# Never commit envs
+infra/docker/.env

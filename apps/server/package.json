@@ -1,21 +1,28 @@
 {
   "name": "@wmx/server",
-  "version": "0.1.0",
   "private": true,
-  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "build": "pnpm exec tsc -p .",
+    "build": "tsc -p .",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
+    "cookie-parser": "^1.4.7",
     "express": "^4.19.2",
-    "pg": "^8.11.0",
-    "node-quickbooks": "^2.0.46"
+    "node-quickbooks": "^2.0.0",
+    "pg": "^8.12.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "tsx": "^4.15.7",
-    "@types/node": "^20.x"
+    "@types/cookie-parser": "^1.4.9",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.30",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.0.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.9"
   }
 }
+

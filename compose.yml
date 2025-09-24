@@ -1,0 +1,11 @@
+services:
+  ragmate:
+    image: ghcr.io/ragmate/ragmate:latest
+    ports:
+      - "11434:11434"
+    env_file:
+      - ./.ragmate.env
+    volumes:
+      - .:/project
+      - ./docker_data/ragmate:/apps/cache
+

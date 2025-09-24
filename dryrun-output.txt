@@ -1,0 +1,6 @@
+Parsed 1 commitsParsed 3 commits
+New history written in 0.15 seconds; now repacking/cleaning...
+NOTE: Not running fast-import or cleaning up; --dry-run passed.
+      Requested filtering can be seen by comparing:
+        .git/filter-repo/fast-export.original
+        .git/filter-repo/fast-export.filtered

@@ -1,0 +1,5 @@
+Parsed 1 commitsParsed 3 commitsHEAD is now at 29d66a2 Remove node_modules from repo
+
+New history written in 0.22 seconds; now repacking/cleaning...
+Repacking your repo and cleaning out old unneeded objects
+Completely finished after 0.44 seconds.
